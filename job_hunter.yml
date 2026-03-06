@@ -1,56 +1,32 @@
-name: 🛡️ Daily SOC Job Hunter
+name: Daily SOC Job Hunter
 
 on:
   schedule:
-    # Runs every day at 9:00 AM IST (3:30 AM UTC)
     - cron: "30 3 * * *"
-
-  # Allow manual trigger from GitHub Actions UI
   workflow_dispatch:
 
 jobs:
   hunt-jobs:
-    name: Search & Notify SOC Jobs
+    name: Search and Notify SOC Jobs
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout repo
-      - name: 📥 Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Restore seen_jobs cache (avoids duplicate alerts)
-      - name: 💾 Restore seen jobs cache
-        uses: actions/cache@v4
-        with:
-          path: seen_jobs.json
-          key: seen-jobs-${{ runner.os }}
-          restore-keys: seen-jobs-
-
-      # 3. Set up Python
-      - name: 🐍 Set up Python 3.11
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # 4. Install dependencies
-      - name: 📦 Install dependencies
-        run: |
-          pip install requests beautifulsoup4
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
 
-      # 5. Run job hunter
-      - name: 🔍 Run job hunter
+      - name: Run job hunter
         env:
-          GMAIL_USER:        ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASS:    ${{ secrets.GMAIL_APP_PASS }}
-          GMAIL_TO:          ${{ secrets.GMAIL_TO }}
-          TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python scripts/job_hunter.py
-
-      # 6. Save updated seen_jobs cache
-      - name: 💾 Save seen jobs cache
-        uses: actions/cache@v4
-        with:
-          path: seen_jobs.json
-          key: seen-jobs-${{ runner.os }}-${{ github.run_id }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
+          GMAIL_TO: ${{ secrets.GMAIL_TO }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scripts/job_hunter.py
