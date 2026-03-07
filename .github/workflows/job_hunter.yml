@@ -36,6 +36,7 @@ jobs:
           GMAIL_TO: ${{ secrets.GMAIL_TO }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
         run: python scripts/job_hunter.py
 
       - name: Save seen jobs cache
