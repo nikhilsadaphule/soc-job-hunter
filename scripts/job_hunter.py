@@ -1,6 +1,8 @@
 """
-Job Hunter Agent for Nikhil Sadaphule
-Scrapes SOC Engineer jobs from multiple sources and sends alerts via Gmail + Telegram
+Final Full Coverage SOC Job Hunter — Nikhil Sadaphule
+Uses JSearch API (RapidAPI) — searches LinkedIn, Indeed, 
+Glassdoor, Google Jobs, Naukri, company websites all at once
+Notifications: Gmail + Telegram
 """
 
 import os
@@ -8,91 +10,149 @@ import json
 import hashlib
 import smtplib
 import requests
+import time
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from bs4 import BeautifulSoup
 
 # ─────────────────────────────────────────────
-# CONFIG — all values loaded from GitHub Secrets
+# CONFIG — loaded from GitHub Secrets
 # ─────────────────────────────────────────────
-GMAIL_USER       = os.environ["GMAIL_USER"]         # your Gmail address
-GMAIL_APP_PASS   = os.environ["GMAIL_APP_PASS"]     # Gmail App Password
-GMAIL_TO         = os.environ["GMAIL_TO"]           # recipient email (can be same)
-TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]     # Telegram bot token
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]  # your Telegram chat ID
+GMAIL_USER       = os.environ["GMAIL_USER"]
+GMAIL_APP_PASS   = os.environ["GMAIL_APP_PASS"]
+GMAIL_TO         = os.environ["GMAIL_TO"]
+TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+RAPIDAPI_KEY     = os.environ["RAPIDAPI_KEY"]
 
 SEEN_JOBS_FILE = "seen_jobs.json"
 
-JOB_SEARCHES = [
-    {
-        "source": "Indeed India",
-        "url": "https://in.indeed.com/jobs?q=SOC+Analyst+entry+level&l=Pune%2C+Maharashtra",
-        "label": "Indeed — Pune"
-    },
-    {
-        "source": "Indeed India",
-        "url": "https://in.indeed.com/jobs?q=SOC+Engineer+fresher&l=Mumbai%2C+Maharashtra",
-        "label": "Indeed — Mumbai"
-    },
-    {
-        "source": "Indeed India",
-        "url": "https://in.indeed.com/jobs?q=SOC+Analyst+remote&l=India",
-        "label": "Indeed — Remote India"
-    },
+# ─────────────────────────────────────────────
+# SEARCH QUERIES
+# Covers: LinkedIn, Indeed, Glassdoor, Naukri,
+#         Google Jobs, and company websites
+# ─────────────────────────────────────────────
+SEARCH_QUERIES = [
+    # Location specific
+    "SOC Analyst entry level Pune India",
+    "SOC Analyst fresher Mumbai India",
+    "SOC Engineer entry level India remote",
+    # Tool specific
+    "SIEM analyst entry level India Splunk",
+    "QRadar SOC analyst India",
+    "Microsoft Sentinel SOC analyst India",
+    # Role specific
+    "Security Operations Center L1 analyst India",
+    "Incident Response analyst fresher India",
+    "Threat detection analyst entry level India",
+    "Cybersecurity analyst fresher Pune Mumbai",
+    # Company specific
+    "SOC analyst Wipro entry level",
+    "SOC analyst Deloitte India fresher",
 ]
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    )
-}
+# ─────────────────────────────────────────────
+# SCORING
+# ─────────────────────────────────────────────
+def score_job(job):
+    score = 5
+    title    = job.get("title", "").lower()
+    company  = job.get("company", "").lower()
+    location = job.get("location", "").lower()
 
-KEYWORDS = [
-    "soc", "security analyst", "siem", "splunk", "qradar",
-    "sentinel", "incident response", "threat hunting",
-    "cloud security", "cybersecurity", "information security"
-]
+    # Title keywords
+    high  = ["soc", "security analyst", "siem", "incident response", "security operations"]
+    bonus = ["splunk", "qradar", "sentinel", "threat", "cloud security", "l1", "tier 1"]
+    fresh = ["entry", "fresher", "junior", "graduate", "trainee", "0-2", "0-1"]
+
+    for kw in high:
+        if kw in title: score += 1
+    for kw in bonus:
+        if kw in title: score += 0.5
+    for kw in fresh:
+        if kw in title or kw in company: score += 0.5
+
+    # Location bonus
+    if any(loc in location.lower() for loc in ["pune", "mumbai", "india", "remote"]):
+        score += 0.5
+
+    return min(round(score, 1), 10)
 
 
 # ─────────────────────────────────────────────
-# SCRAPING
+# JSEARCH API — searches ALL job platforms
 # ─────────────────────────────────────────────
-def scrape_indeed(url, label):
-    jobs = []
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        cards = soup.find_all("div", class_="job_seen_beacon")
-        for card in cards:
-            title_el = card.find("h2", class_="jobTitle")
-            company_el = card.find("span", attrs={"data-testid": "company-name"})
-            location_el = card.find("div", attrs={"data-testid": "text-location"})
-            link_el = card.find("a", href=True)
+def search_jsearch():
+    all_jobs = []
+    print("\n[JSearch] Searching across LinkedIn, Indeed, Glassdoor, Naukri + more...")
+    print("=" * 55)
 
-            title    = title_el.get_text(strip=True) if title_el else "N/A"
-            company  = company_el.get_text(strip=True) if company_el else "N/A"
-            location = location_el.get_text(strip=True) if location_el else "N/A"
-            link     = ("https://in.indeed.com" + link_el["href"]) if link_el else url
+    seen_in_session = set()
 
-            if any(kw in title.lower() for kw in KEYWORDS):
-                jobs.append({
-                    "title": title,
+    for query in SEARCH_QUERIES:
+        try:
+            resp = requests.get(
+                "https://jsearch.p.rapidapi.com/search",
+                headers={
+                    "x-rapidapi-host": "jsearch.p.rapidapi.com",
+                    "x-rapidapi-key": RAPIDAPI_KEY
+                },
+                params={
+                    "query": query,
+                    "page": "1",
+                    "num_pages": "1",
+                    "country": "in",
+                    "date_posted": "month",
+                },
+                timeout=20
+            )
+
+            if resp.status_code != 200:
+                print(f"  [{resp.status_code}] Failed: {query}")
+                continue
+
+            data = resp.json()
+            results = data.get("data", [])
+            new_count = 0
+
+            for job in results:
+                title    = job.get("job_title", "N/A")
+                company  = job.get("employer_name", "N/A")
+                location = f"{job.get('job_city', '')}, {job.get('job_country', 'India')}".strip(", ")
+                link     = job.get("job_apply_link") or job.get("job_google_link", "#")
+                source   = job.get("job_publisher", "JSearch")
+                remote   = "🌐 Remote" if job.get("job_is_remote") else location
+
+                # Session dedup
+                job_id = hashlib.md5(f"{title}{company}".encode()).hexdigest()
+                if job_id in seen_in_session:
+                    continue
+                seen_in_session.add(job_id)
+
+                all_jobs.append({
+                    "title":   title,
                     "company": company,
-                    "location": location,
-                    "link": link,
-                    "source": label,
-                    "date": datetime.now().strftime("%d %b %Y")
+                    "location": remote,
+                    "link":    link,
+                    "source":  source,
+                    "date":    datetime.now().strftime("%d %b %Y")
                 })
-    except Exception as e:
-        print(f"[WARN] Scraping failed for {label}: {e}")
-    return jobs
+                new_count += 1
+
+            print(f"  ✓ '{query[:45]}' → {new_count} jobs")
+            time.sleep(0.8)  # respect rate limits
+
+        except Exception as e:
+            print(f"  [WARN] Query failed '{query}': {e}")
+
+    print(f"\n  Total raw jobs: {len(all_jobs)}")
+    return all_jobs
 
 
+# ─────────────────────────────────────────────
+# DEDUPLICATION (across days)
+# ─────────────────────────────────────────────
 def deduplicate(jobs):
-    """Return only jobs not seen before, update seen list."""
     try:
         with open(SEEN_JOBS_FILE, "r") as f:
             seen = set(json.load(f))
@@ -112,37 +172,22 @@ def deduplicate(jobs):
     return new_jobs
 
 
-def score_job(job):
-    """Score job relevance 1–10 based on title keywords."""
-    score = 5
-    title = job["title"].lower()
-    high  = ["soc", "security analyst", "siem", "incident response"]
-    bonus = ["splunk", "qradar", "sentinel", "threat", "cloud security"]
-    for kw in high:
-        if kw in title:
-            score += 1
-    for kw in bonus:
-        if kw in title:
-            score += 0.5
-    return min(round(score, 1), 10)
-
-
 # ─────────────────────────────────────────────
-# GMAIL
+# GMAIL — Beautiful HTML digest
 # ─────────────────────────────────────────────
 def build_html_email(jobs, date_str):
     rows = ""
     for i, j in enumerate(jobs, 1):
         score = score_job(j)
-        bar_color = "#22c55e" if score >= 8 else "#f59e0b" if score >= 6 else "#ef4444"
+        color = "#22c55e" if score >= 8 else "#f59e0b" if score >= 6 else "#ef4444"
         rows += f"""
         <tr style="background:{'#f9fafb' if i%2==0 else '#ffffff'}">
-          <td style="padding:12px;font-weight:600;color:#1e293b">{j['title']}</td>
+          <td style="padding:12px;font-weight:600;color:#1e293b;max-width:220px">{j['title']}</td>
           <td style="padding:12px;color:#334155">{j['company']}</td>
           <td style="padding:12px;color:#64748b">{j['location']}</td>
-          <td style="padding:12px;color:#64748b">{j['source']}</td>
+          <td style="padding:12px;color:#94a3b8;font-size:12px">{j['source']}</td>
           <td style="padding:12px;text-align:center">
-            <span style="background:{bar_color};color:white;padding:3px 10px;
+            <span style="background:{color};color:white;padding:3px 10px;
                          border-radius:12px;font-size:13px;font-weight:bold">
               {score}/10
             </span>
@@ -153,36 +198,35 @@ def build_html_email(jobs, date_str):
           </td>
         </tr>"""
 
+    high_fit = len([j for j in jobs if score_job(j) >= 8])
+    companies = len(set(j['company'] for j in jobs))
+
     html = f"""
     <html><body style="font-family:Arial,sans-serif;background:#f1f5f9;margin:0;padding:20px">
-      <div style="max-width:900px;margin:auto;background:white;border-radius:12px;
+      <div style="max-width:960px;margin:auto;background:white;border-radius:12px;
                   box-shadow:0 2px 12px rgba(0,0,0,0.1);overflow:hidden">
 
         <!-- Header -->
         <div style="background:linear-gradient(135deg,#1e3a5f,#3b82f6);padding:28px 32px">
           <h1 style="color:white;margin:0;font-size:24px">🛡️ Daily SOC Job Digest</h1>
-          <p style="color:#bfdbfe;margin:6px 0 0">
-            {date_str} &nbsp;|&nbsp; {len(jobs)} new opportunities found for Nikhil Sadaphule
+          <p style="color:#bfdbfe;margin:8px 0 0;font-size:14px">
+            {date_str} &nbsp;|&nbsp; Powered by JSearch — LinkedIn · Indeed · Glassdoor · Naukri · Google Jobs
           </p>
         </div>
 
-        <!-- Summary bar -->
-        <div style="display:flex;gap:0;border-bottom:1px solid #e2e8f0">
-          <div style="flex:1;padding:16px 24px;text-align:center;border-right:1px solid #e2e8f0">
-            <div style="font-size:28px;font-weight:bold;color:#3b82f6">{len(jobs)}</div>
-            <div style="font-size:12px;color:#94a3b8;margin-top:2px">NEW JOBS TODAY</div>
+        <!-- Stats -->
+        <div style="display:flex;border-bottom:1px solid #e2e8f0">
+          <div style="flex:1;padding:20px;text-align:center;border-right:1px solid #e2e8f0">
+            <div style="font-size:32px;font-weight:bold;color:#3b82f6">{len(jobs)}</div>
+            <div style="font-size:11px;color:#94a3b8;margin-top:4px">NEW JOBS TODAY</div>
           </div>
-          <div style="flex:1;padding:16px 24px;text-align:center;border-right:1px solid #e2e8f0">
-            <div style="font-size:28px;font-weight:bold;color:#22c55e">
-              {len([j for j in jobs if score_job(j) >= 8])}
-            </div>
-            <div style="font-size:12px;color:#94a3b8;margin-top:2px">HIGH FIT (8+)</div>
+          <div style="flex:1;padding:20px;text-align:center;border-right:1px solid #e2e8f0">
+            <div style="font-size:32px;font-weight:bold;color:#22c55e">{high_fit}</div>
+            <div style="font-size:11px;color:#94a3b8;margin-top:4px">HIGH FIT (8+/10)</div>
           </div>
-          <div style="flex:1;padding:16px 24px;text-align:center">
-            <div style="font-size:28px;font-weight:bold;color:#f59e0b">
-              {len(set(j['company'] for j in jobs))}
-            </div>
-            <div style="font-size:12px;color:#94a3b8;margin-top:2px">COMPANIES</div>
+          <div style="flex:1;padding:20px;text-align:center">
+            <div style="font-size:32px;font-weight:bold;color:#f59e0b">{companies}</div>
+            <div style="font-size:11px;color:#94a3b8;margin-top:4px">COMPANIES</div>
           </div>
         </div>
 
@@ -196,7 +240,7 @@ def build_html_email(jobs, date_str):
                 <th style="padding:12px;text-align:left;color:#475569;border-bottom:2px solid #e2e8f0">Location</th>
                 <th style="padding:12px;text-align:left;color:#475569;border-bottom:2px solid #e2e8f0">Source</th>
                 <th style="padding:12px;text-align:center;color:#475569;border-bottom:2px solid #e2e8f0">Fit Score</th>
-                <th style="padding:12px;text-align:left;color:#475569;border-bottom:2px solid #e2e8f0">Link</th>
+                <th style="padding:12px;text-align:left;color:#475569;border-bottom:2px solid #e2e8f0">Apply</th>
               </tr>
             </thead>
             <tbody>{rows}</tbody>
@@ -206,9 +250,9 @@ def build_html_email(jobs, date_str):
         <!-- Footer -->
         <div style="background:#f8fafc;padding:20px 32px;border-top:1px solid #e2e8f0;
                     font-size:12px;color:#94a3b8;text-align:center">
-          🤖 Automated by your Job Hunter Agent &nbsp;|&nbsp;
-          Searching: Indeed India (Pune, Mumbai, Remote) &nbsp;|&nbsp;
-          Profile: SOC Engineer · Entry Level · SIEM · Incident Response
+          🤖 Automated Job Hunter for Nikhil Sadaphule &nbsp;|&nbsp;
+          Sources: LinkedIn · Indeed · Glassdoor · Naukri · Google Jobs &nbsp;|&nbsp;
+          Profile: SOC Engineer · Entry Level · Pune/Mumbai/Remote
         </div>
       </div>
     </body></html>"""
@@ -219,19 +263,15 @@ def send_gmail(jobs, date_str):
     if not jobs:
         print("[INFO] No new jobs — skipping Gmail.")
         return
-
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"🛡️ {len(jobs)} New SOC Jobs Found — {date_str}"
     msg["From"]    = GMAIL_USER
     msg["To"]      = GMAIL_TO
-
-    html = build_html_email(jobs, date_str)
-    msg.attach(MIMEText(html, "html"))
-
+    msg.attach(MIMEText(build_html_email(jobs, date_str), "html"))
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(GMAIL_USER, GMAIL_APP_PASS)
         server.sendmail(GMAIL_USER, GMAIL_TO, msg.as_string())
-    print(f"[OK] Gmail sent — {len(jobs)} jobs")
+    print(f"[OK] Gmail sent — {len(jobs)} jobs to {GMAIL_TO}")
 
 
 # ─────────────────────────────────────────────
@@ -243,43 +283,49 @@ def send_telegram(jobs, date_str):
         return
 
     high_fit = [j for j in jobs if score_job(j) >= 8]
-    top      = sorted(jobs, key=score_job, reverse=True)[:5]
+    top5     = sorted(jobs, key=score_job, reverse=True)[:5]
 
-    # Summary message
-    summary = (
+    msg = (
         f"🛡️ *SOC Job Digest — {date_str}*\n\n"
-        f"📊 *{len(jobs)}* new jobs found\n"
-        f"🟢 *{len(high_fit)}* high-fit roles (8+/10)\n"
-        f"🏢 *{len(set(j['company'] for j in jobs))}* companies\n\n"
-        f"─────────────────────\n"
-        f"🔝 *Top {len(top)} Picks Today:*\n\n"
+        f"📊 *{len(jobs)}* new jobs found today\n"
+        f"🟢 *{len(high_fit)}* high\\-fit roles \\(8\\+/10\\)\n"
+        f"🏢 *{len(set(j['company'] for j in jobs))}* companies hiring\n\n"
+        f"📡 *Sources:* LinkedIn · Indeed · Glassdoor · Naukri\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔝 *Top 5 Picks For You:*\n\n"
     )
 
-    for i, j in enumerate(top, 1):
+    for i, j in enumerate(top5, 1):
         score = score_job(j)
         emoji = "🟢" if score >= 8 else "🟡" if score >= 6 else "🔴"
-        summary += (
-            f"{emoji} *{i}. {j['title']}*\n"
-            f"   🏢 {j['company']}\n"
-            f"   📍 {j['location']}\n"
-            f"   ⭐ Fit: {score}/10\n"
+        # Escape special chars for Telegram MarkdownV2
+        title   = j['title'].replace('-','\\-').replace('.','\\.')
+        company = j['company'].replace('-','\\-').replace('.','\\.')
+        loc     = j['location'].replace('-','\\-').replace('.','\\.')
+        msg += (
+            f"{emoji} *{i}\\. {title}*\n"
+            f"   🏢 {company}\n"
+            f"   📍 {loc}\n"
+            f"   ⭐ Fit Score: {score}/10\n"
             f"   🔗 [Apply Here]({j['link']})\n\n"
         )
 
-    summary += "─────────────────────\n🤖 _Your Job Hunter Agent_"
+    msg += "━━━━━━━━━━━━━━━━━━━━━\n🤖 _Your Automated Job Hunter_"
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    resp = requests.post(url, json={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": summary,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
-    }, timeout=15)
-
+    resp = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": msg,
+            "parse_mode": "MarkdownV2",
+            "disable_web_page_preview": True
+        },
+        timeout=15
+    )
     if resp.status_code == 200:
-        print(f"[OK] Telegram sent — top {len(top)} jobs")
+        print(f"[OK] Telegram sent — top {len(top5)} jobs")
     else:
-        print(f"[ERROR] Telegram failed: {resp.text}")
+        print(f"[ERROR] Telegram: {resp.status_code} — {resp.text}")
 
 
 # ─────────────────────────────────────────────
@@ -287,27 +333,29 @@ def send_telegram(jobs, date_str):
 # ─────────────────────────────────────────────
 def main():
     date_str = datetime.now().strftime("%d %B %Y")
-    print(f"\n🔍 Job Hunter started — {date_str}\n")
+    print(f"\n{'='*55}")
+    print(f"  SOC Job Hunter — {date_str}")
+    print(f"  Searching: LinkedIn, Indeed, Glassdoor, Naukri")
+    print(f"{'='*55}")
 
-    all_jobs = []
-    for search in JOB_SEARCHES:
-        print(f"  Scraping {search['label']}...")
-        found = scrape_indeed(search["url"], search["label"])
-        print(f"  → {len(found)} jobs found")
-        all_jobs.extend(found)
+    # Search all platforms via JSearch
+    all_jobs = search_jsearch()
 
     # Sort by fit score
     all_jobs.sort(key=score_job, reverse=True)
 
-    # Remove duplicates from previous runs
+    # Remove jobs seen in previous runs
     new_jobs = deduplicate(all_jobs)
-    print(f"\n✅ {len(new_jobs)} NEW jobs after deduplication\n")
 
-    # Send alerts
+    print(f"\n{'='*55}")
+    print(f"  New jobs (not seen before): {len(new_jobs)}")
+    print(f"{'='*55}\n")
+
+    # Send notifications
     send_gmail(new_jobs, date_str)
     send_telegram(new_jobs, date_str)
 
-    print("\n🎯 Job Hunter finished.\n")
+    print("\n✅ Job Hunter finished successfully!\n")
 
 
 if __name__ == "__main__":
